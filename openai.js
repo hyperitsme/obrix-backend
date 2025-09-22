@@ -1,24 +1,32 @@
-import OpenAI from 'openai';
+import OpenAI from "openai";
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-const MODEL = process.env.MODEL || 'gpt-4.1-mini';
+const MODEL = process.env.MODEL || "gpt-4o-mini"; // bisa diganti sesuai kebutuhan
 
-export async function generateIndexHtml({ name, ticker, description, logoUrl, theme='dark', accent='#7c3aed', layout='hero' }) {
+export async function generateIndexHtml({
+  name,
+  ticker,
+  description,
+  logoUrl,
+  theme = "dark",
+  accent = "#7c3aed",
+  layout = "hero",
+}) {
   const system = [
-    'You are an expert landing-page designer & front-end engineer.',
-    'Output a COMPLETE, VALID, SINGLE-FILE index.html.',
-    'Inline all CSS and JS (no external network requests).',
-    'Use semantic HTML, accessible ARIA, responsive design.',
-    'Default font stack; include minimal Tailwind-like utility styles via inline <style>.',
-    'Respect the provided theme (dark/light) and accent color.',
-    'If a logo URL is provided, include it in an <img>; otherwise use a simple text logotype.',
-    'Include subtle animations on hover and scroll.',
-    'Ensure the page passes basic Lighthouse checks and is mobile-first.',
-    'No analytics, no external scripts, no iframes, no remote fonts/icons.'
-  ].join('\n');
+    "You are an expert landing-page designer & front-end engineer.",
+    "Output a COMPLETE, VALID, SINGLE-FILE index.html.",
+    "Inline all CSS and JS (no external network requests).",
+    "Use semantic HTML, accessible ARIA, responsive design.",
+    "Default font stack; include minimal Tailwind-like utility styles via inline <style>.",
+    "Respect the provided theme (dark/light) and accent color.",
+    "If a logo URL is provided, include it in an <img>; otherwise use a simple text logotype.",
+    "Include subtle animations on hover and scroll.",
+    "Ensure the page passes basic Lighthouse checks and is mobile-first.",
+    "No analytics, no external scripts, no iframes, no remote fonts/icons.",
+  ].join("\n");
 
   const user = `
 Project Name: ${name}
@@ -26,7 +34,7 @@ Ticker: ${ticker}
 Theme: ${theme}
 Accent: ${accent}
 Preferred Layout: ${layout}
-Logo URL: ${logoUrl || 'N/A'}
+Logo URL: ${logoUrl || "N/A"}
 
 Description (marketing tone, hero + features + token section + CTA):
 ${description}
@@ -42,22 +50,24 @@ Strict Requirements:
 - Provide favicon as base64 data URL (tiny placeholder) within the HTML <head>
 `;
 
-  const response = await client.responses.create({
-    model: MODEL,
-    input: [
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ],
-  });
+  try {
+    const response = await client.chat.completions.create({
+      model: MODEL,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    });
 
-  const html = response.output_text || (
-    response?.output?.[0]?.content?.find(p => p.type === 'output_text')?.text
-  ) || (
-    response?.output?.[0]?.content?.find(p => p.type === 'text')?.text
-  );
+    const html = response.choices[0].message.content;
 
-  if (!html || !String(html).includes('<html')) {
-    throw new Error('Model did not return a valid index.html');
+    if (!html || !String(html).includes("<html")) {
+      throw new Error("Model did not return a valid index.html");
+    }
+
+    return html;
+  } catch (err) {
+    console.error("OpenAI API error:", err);
+    throw err;
   }
-  return html;
 }
