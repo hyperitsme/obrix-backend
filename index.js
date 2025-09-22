@@ -8,12 +8,13 @@ import path from 'path';
 import archiver from 'archiver';
 import { fileURLToPath } from 'url';
 import mime from 'mime-types';
+import crypto from 'crypto';
 import { generateIndexHtml } from './openai.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ====== App & CORS ======
+// ===== App & CORS =====
 const app = express();
 const PORT = process.env.PORT || 5050;
 
@@ -21,54 +22,50 @@ const originsEnv = process.env.CORS_ORIGINS || '*';
 const corsOptions = originsEnv === '*'
   ? { origin: true }
   : {
-      origin: function (origin, callback) {
+      origin(origin, cb) {
         const allowed = originsEnv.split(',').map(s => s.trim());
-        if (!origin || allowed.includes(origin)) return callback(null, true);
-        callback(new Error('Not allowed by CORS'));
+        if (!origin || allowed.includes(origin)) return cb(null, true);
+        cb(new Error('Not allowed by CORS'));
       },
-      credentials: true
+      credentials: true,
     };
 
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '15mb' }));
 
-// ====== Uploads ======
+// ===== Directories =====
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const PREVIEWS_DIR = path.join(__dirname, 'previews');
+for (const d of [UPLOAD_DIR, PREVIEWS_DIR]) {
+  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+}
 
+// ===== Multer (upload) =====
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
   filename: (req, file, cb) => {
     const base = Date.now() + '-' + (file.originalname || 'file');
     cb(null, base.replace(/[^a-zA-Z0-9._-]/g, '_'));
-  }
+  },
 });
 const upload = multer({ storage });
 
-// Serve files
-app.use('/uploads', express.static(UPLOAD_DIR));
-
-// ====== Utils ======
+// ===== Helpers =====
 function toPublicUrl(req, rel) {
   if (!rel) return '';
   if (/^https?:\/\//i.test(rel)) return rel;
   if (rel.startsWith('/uploads/')) {
-    // bangun absolute host dari request
     const base = `${req.protocol}://${req.get('host')}`;
     return base + rel;
   }
   return rel;
 }
-
 function stripCodeFences(s) {
-  if (!s) return s;
-  // buang ```html … ```
-  return String(s)
+  return String(s || '')
+    .replace(/```html|```/g, '')
     .replace(/^[\s`]*html\b/i, '')
-    .replace(/```/g, '')
     .trim();
 }
-
 function readAsDataUri(absPath) {
   try {
     if (!absPath || !fs.existsSync(absPath)) return '';
@@ -80,19 +77,13 @@ function readAsDataUri(absPath) {
     return '';
   }
 }
-
-/**
- * Inline SEMUA kemunculan /uploads/... menjadi data:uri (agar preview selalu tampil).
- */
 function inlineUploadsAsDataUri(html) {
   let out = String(html || '');
-  // src="/uploads/..."
   out = out.replace(/src=["'](\/uploads\/[^"']+)["']/gi, (m, rel) => {
     const abs = path.join(UPLOAD_DIR, path.basename(rel));
     const data = readAsDataUri(abs);
     return data ? `src="${data}"` : m;
   });
-  // url(/uploads/...)
   out = out.replace(/url\((['"]?)(\/uploads\/[^)'"]+)\1\)/gi, (m, q, rel) => {
     const abs = path.join(UPLOAD_DIR, path.basename(rel));
     const data = readAsDataUri(abs);
@@ -100,26 +91,17 @@ function inlineUploadsAsDataUri(html) {
   });
   return out;
 }
-
-/**
- * Paksa logo & background muncul.
- * - Preview: pakai data URI (tidak tergantung jaringan).
- * - ZIP: pakai path relatif ./assets/...
- * - Tambah body::before agar background SELALU terlihat.
- */
 function injectAssets(html, { logoUrl, backgroundUrl, bgColor = '#0b0b0b' }, mode) {
   let out = String(html || '');
 
-  // pastikan <head> dan </body> ada
   if (!/<\/head>/i.test(out)) out = out.replace(/<html[^>]*>/i, '$&\n<head></head>');
   if (!/<\/body>/i.test(out)) out = out.replace(/<\/head>/i, '</head>\n<body>\n</body>');
 
-  // var dasar
   if (!out.includes('--obrix-bg-color')) {
     out = out.replace(/<\/head>/i, `<style>:root{--obrix-bg-color:${bgColor};}</style>\n</head>`);
   }
 
-  // ===== background =====
+  // background
   if (backgroundUrl) {
     let bgRef = '';
     if (mode === 'preview') {
@@ -134,14 +116,9 @@ html,body{height:100%;}
 body{background-color:var(--obrix-bg-color) !important;}
 body::before{
   content:"";
-  position:fixed;
-  inset:0;
-  z-index:-1;
+  position:fixed; inset:0; z-index:-1;
   background-image:url("${bgRef}");
-  background-size:cover;
-  background-position:center;
-  background-repeat:no-repeat;
-  opacity:1;
+  background-size:cover; background-position:center; background-repeat:no-repeat;
   pointer-events:none;
 }
 `;
@@ -149,7 +126,7 @@ body::before{
     }
   }
 
-  // ===== logo =====
+  // logo
   if (logoUrl) {
     let tag = '';
     if (mode === 'preview') {
@@ -171,13 +148,17 @@ body::before{
 
   return out;
 }
+function absoluteBase(req) {
+  return `${req.protocol}://${req.get('host')}`;
+}
 
-// ====== Routes ======
+// ===== Routes =====
 app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'obrix-website-generator', time: new Date().toISOString() });
 });
 
-// Upload endpoints (opsional — front-end boleh pakai /api/upload-logo saja)
+// uploads
+app.use('/uploads', express.static(UPLOAD_DIR));
 app.post('/api/upload-logo', upload.single('logo'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const rel = `/uploads/${req.file.filename}`;
@@ -189,7 +170,17 @@ app.post('/api/upload-background', upload.single('background'), (req, res) => {
   res.json({ ok: true, path: rel, url: toPublicUrl(req, rel) });
 });
 
-// Generate preview HTML
+// ========= NEW: Shareable preview =========
+// Serve saved previews: /preview/:id
+app.get('/preview/:id', (req, res) => {
+  const id = (req.params.id || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  const file = path.join(PREVIEWS_DIR, `${id}.html`);
+  if (!fs.existsSync(file)) return res.status(404).send('Not found');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.sendFile(file);
+});
+
+// Generate (preview + shareUrl)
 app.post('/api/generate', async (req, res) => {
   try {
     const {
@@ -202,7 +193,6 @@ app.post('/api/generate', async (req, res) => {
       return res.status(400).json({ error: 'name, ticker, description are required' });
     }
 
-    // terima berbagai nama field
     const logoRel = req.body.logoUrl || req.body.logoPath || req.body.logo || '';
     const bgRel   = req.body.backgroundUrl || req.body.backgroundPath || req.body.background || '';
 
@@ -218,14 +208,20 @@ app.post('/api/generate', async (req, res) => {
     html = injectAssets(html, { logoUrl: logoRel, backgroundUrl: bgRel, bgColor }, 'preview');
     html = inlineUploadsAsDataUri(html);
 
-    res.json({ ok: true, html });
+    // simpan ke file agar bisa dishare via URL
+    const id = crypto.randomBytes(10).toString('hex'); // 20 hex chars
+    const previewFile = path.join(PREVIEWS_DIR, `${id}.html`);
+    fs.writeFileSync(previewFile, html, 'utf8');
+
+    const previewUrl = `${absoluteBase(req)}/preview/${id}`;
+    res.json({ ok: true, html, previewUrl });
   } catch (err) {
     console.error('Generate error:', err);
     res.status(500).json({ error: err.message || 'Failed to generate HTML' });
   }
 });
 
-// Generate ZIP (index.html + assets/)
+// Generate ZIP
 app.post('/api/generate-zip', async (req, res) => {
   try {
     const {
@@ -253,19 +249,14 @@ app.post('/api/generate-zip', async (req, res) => {
     html = injectAssets(html, { logoUrl: logoRel, backgroundUrl: bgRel, bgColor }, 'zip');
 
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${(name || 'site').replace(/[^a-z0-9_-]/gi, '_')}.zip"`
-    );
+    res.setHeader('Content-Disposition',
+      `attachment; filename="${(name || 'site').replace(/[^a-z0-9_-]/gi, '_')}.zip"`);
 
     const archive = archiver('zip', { zlib: { level: 9 } });
     archive.on('error', (err) => { throw err; });
     archive.pipe(res);
 
-    // index.html
     archive.append(html, { name: 'index.html' });
-
-    // assets (jika ada)
     if (logoRel) {
       const abs = path.join(UPLOAD_DIR, path.basename(logoRel));
       if (fs.existsSync(abs)) archive.file(abs, { name: `assets/${path.basename(abs)}` });
@@ -282,7 +273,6 @@ app.post('/api/generate-zip', async (req, res) => {
   }
 });
 
-// listen 0.0.0.0 (Render/hosting)
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Backend running on http://0.0.0.0:${PORT}`);
 });
