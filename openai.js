@@ -2,13 +2,13 @@
 import OpenAI from "openai";
 
 /**
- * Generate a complete single-file index.html from user payload.
- * The model is instructed to:
- * - Return ONLY valid HTML (no markdown).
- * - Inline ALL CSS & JS (no external requests).
- * - Use provided assets/colors/socials.
- * - English copywriting, accessible, responsive.
- * - Do not mention how it was generated.
+ * Minta model mengembalikan 1 file HTML utuh:
+ * - Inline CSS & JS
+ * - Aksesibilitas & responsive
+ * - Menggunakan primary/accent colors
+ * - Memakai logo/background (data URL) jika ada
+ * - Copywriting harus relevan dg project (no boilerplate)
+ * - Jangan menyebut model/prompt di output
  */
 export async function generateSiteHTML(payload) {
   const {
@@ -21,22 +21,20 @@ export async function generateSiteHTML(payload) {
     assets
   } = payload;
 
-  const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-  });
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const model = process.env.MODEL || "gpt-4o-mini";
 
   const system = [
-    "You are an expert landing-page designer & front-end engineer.",
-    "Return a COMPLETE, VALID single-file index.html.",
-    "Inline all CSS & JS (no external fonts/scripts/iframes).",
-    "Use semantic HTML, A11y, responsive design.",
-    "Use CSS variables; system fonts.",
-    "Respect theme colors (primary/accent) provided.",
-    "Use provided data URLs for the logo/background if present.",
-    "Include hero, features, call-to-action, socials, and footer.",
-    "Include tasteful hover states and micro-interactions.",
-    "Keep the copy in English; concise and convincing.",
-    "Do NOT mention anything about prompts, models, or how it was generated."
+    "You are a senior brand copywriter and front-end engineer.",
+    "Return ONLY a COMPLETE, VALID single-file index.html.",
+    "Inline all CSS & JS. No external requests (fonts, scripts, iframes).",
+    "Use semantic HTML, accessible roles, keyboard focus styles.",
+    "Mobile-first responsive layout.",
+    "Use :root CSS variables for colors (primary, accent) and system font.",
+    "Use provided data URLs for logo and background if present.",
+    "Provide distinctive, project-specific copy tied to the given description.",
+    "Avoid generic feature names like 'Fast', 'Customizable', 'Reliable'.",
+    "Do NOT mention prompts, models, or how it was generated."
   ].join(" ");
 
   const user = {
@@ -52,40 +50,41 @@ export async function generateSiteHTML(payload) {
   };
 
   const prompt = `
-Build a polished, modern landing page for a crypto/web3 project.
+Build a polished landing page for the project below.
 
-REQUIREMENTS
-- Title: ${name} ${ticker ? `(${ticker})` : ""}
-- Short description: ${description}
-- Primary color: ${user.primaryColor}, Accent color: ${user.accentColor}
-- Logo data URL (if given): ${user.logoDataUrl ? "[PROVIDED]" : "[NONE]"}
-- Background image data URL (if given): ${user.backgroundDataUrl ? "[PROVIDED]" : "[NONE]"}
-- Social links:
-  - Telegram: ${telegram || "N/A"}
-  - X/Twitter: ${twitter || "N/A"}
+PROJECT
+- Name: ${name}
+- Ticker: ${ticker || ""}
+- Description: ${description}
+- Telegram: ${telegram || ""}
+- X/Twitter: ${twitter || ""}
 
-STRUCTURE
-- Sticky header with logo + nav + CTA
-- Hero with background image (if provided), logo (if provided), headline, subhead, CTA buttons
-- 3-6 feature cards (hover interactions)
-- Optional sections: About / Roadmap / FAQs (short)
-- Social buttons (Telegram, X)
-- Footer with © and simple links
+DESIGN
+- Colors: primary=${user.primaryColor}, accent=${user.accentColor}
+- If background image provided, layer it in hero with readable overlay.
+- If logo provided, display in header and/or hero.
+- Sticky header with CTA. Soft card hover interactions.
+
+CONTENT
+- Headline that reflects the project's essence (do NOT use "Fast/Customizable/Reliable").
+- Subheadline tied to the description.
+- 4–6 feature cards with unique names tied to the description (e.g., "Community-led Liquidity", "Audited Contracts", "Cross-chain Routing", etc. — adjust to the given description).
+- Optional: short About / Roadmap / FAQ.
+- Prominent CTA(s). Social buttons for Telegram and X.
+- Footer with © YEAR and simple links.
 
 TECH SPECS
-- Use a :root { --primary: ; --accent: ; } and system font stack
-- Inline CSS/JS only. No external requests.
-- Accessible, high-contrast, keyboard friendly
-- Mobile-first responsive
-- Include a small <script> for any minor interactions
-- DO NOT output anything except the final HTML.
+- Put all styles in a single <style> tag and scripts in a single <script>.
+- Use :root { --primary: ; --accent: ; } and system-ui font stack.
+- Add focus-visible outlines and sufficient contrast.
+- Return ONLY the HTML (no markdown fences, no commentary).
+- The document MUST start with <!doctype html>.
 `;
 
-  const model = process.env.MODEL || "gpt-4o-mini";
-
-  // Use Responses API; robust extraction of the text output
   const res = await client.responses.create({
     model,
+    temperature: 0.8,
+    max_output_tokens: 6000,
     input: [
       { role: "system", content: system },
       { role: "user", content: JSON.stringify(user) },
@@ -93,34 +92,45 @@ TECH SPECS
     ]
   });
 
-  // Try the convenience field first; fallback to traversing output array
-  let html = res.output_text;
-  if (!html) {
-    try {
-      const parts = res.output?.[0]?.content || [];
-      const textPart = parts.find(p => p.type === "output_text" || p.type === "text");
-      html = textPart?.text || "";
-    } catch {}
+  let html = res.output_text?.trim?.() || "";
+  if (!html || !/^<!doctype html>/i.test(html)) {
+    // Try to extract text from segments if convenience field missing
+    const parts = res.output?.[0]?.content || [];
+    const textPart = parts.find(p => p.type === "output_text" || p.type === "text");
+    html = textPart?.text?.trim?.() || "";
   }
-  if (typeof html !== "string" || !html.trim().startsWith("<")) {
-    throw new Error("Model did not return HTML.");
+
+  if (!/^<!doctype html>/i.test(html)) {
+    throw new Error("Generator did not return a valid HTML document.");
   }
-  return html.trim();
+  return html;
 }
 
 /**
- * Minimal local fallback HTML (used if model call fails).
+ * Fallback HTML yang lebih kontekstual, tanpa frase generik.
  */
 export function fallbackHTML(p) {
   const {
     name = "Untitled Project",
     ticker = "$TOKEN",
-    description = "Your project description.",
+    description = "A new crypto project.",
     telegram = "#",
     twitter = "#",
     colors = { primary: "#3b82f6", accent: "#2563eb" },
     assets = { logo: "", background: "" }
   } = p;
+
+  const features = [
+    { title: "Project Mission", body: description.slice(0, 180) + (description.length > 180 ? "..." : "") },
+    { title: "Community Hub", body: "Join our community for updates, governance talks, and launch plans." },
+    { title: "Launch & Utility", body: "A focused roadmap that turns the idea into daily utility." },
+    { title: "Trust & Transparency", body: "Clear docs, visible roadmap, and public socials you can verify." },
+    { title: "Brand & Identity", body: "Strong visuals, consistent tone, and shareable assets." }
+  ];
+
+  const featCards = features.map(f =>
+    `<div class="card"><h3>${f.title}</h3><p>${f.body}</p></div>`
+  ).join("");
 
   return `<!doctype html>
 <html lang="en">
@@ -132,11 +142,13 @@ export function fallbackHTML(p) {
 :root{--primary:${colors.primary};--accent:${colors.accent}}
 *{box-sizing:border-box}html,body{margin:0}
 body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial;color:#e8ebf5;background:#0b0f1a}
-.hero{min-height:62vh;display:grid;place-items:center;text-align:center;padding:40px;
+a{color:inherit;text-decoration:none}
+.header{position:sticky;top:0;background:#0b0f1acc;border-bottom:1px solid #ffffff22;backdrop-filter:blur(8px);z-index:50}
+.wrap{max-width:980px;margin:0 auto;padding:18px}
+.hero{min-height:62vh;display:grid;place-items:center;text-align:center;padding:42px;
   background:${assets.background ? `url('${assets.background}') center/cover no-repeat` : `linear-gradient(135deg,var(--primary),var(--accent))`}}
-.wrap{max-width:900px;margin:0 auto;padding:24px}
 .logo{width:84px;height:84px;border-radius:20px;box-shadow:0 0 0 6px #ffffff22;margin:0 auto 16px;display:block}
-.btn{display:inline-block;padding:12px 16px;border-radius:12px;border:1px solid #ffffff55;background:#00000033;color:#fff;text-decoration:none;margin:6px}
+.cta{display:inline-block;padding:12px 16px;border-radius:12px;border:1px solid #ffffff55;background:#00000033}
 .grid{display:grid;gap:16px;grid-template-columns:repeat(3,1fr)}@media(max-width:820px){.grid{grid-template-columns:1fr}}
 .card{background:#ffffff10;border:1px solid #ffffff2a;border-radius:14px;padding:16px;transition:.2s}
 .card:hover{transform:translateY(-4px);box-shadow:0 16px 40px -18px rgba(59,130,246,.35)}
@@ -144,24 +156,28 @@ footer{color:#aab3d0;text-align:center;padding:24px;border-top:1px solid #ffffff
 </style>
 </head>
 <body>
+<header class="header"><div class="wrap" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+  <div style="display:flex;align-items:center;gap:10px">
+    ${assets.logo ? `<img class="logo" src="${assets.logo}" alt="logo" style="width:32px;height:32px;margin:0;box-shadow:none"/>` : ""}
+    <strong>${name}</strong><span style="opacity:.7">${ticker}</span>
+  </div>
+  <div style="display:flex;gap:10px"><a class="cta" href="${telegram||'#'}" target="_blank" rel="noopener">Telegram</a><a class="cta" href="${twitter||'#'}" target="_blank" rel="noopener">X</a></div>
+</div></header>
+
 <section class="hero">
   <div class="wrap">
     ${assets.logo ? `<img class="logo" alt="logo" src="${assets.logo}"/>` : ""}
     <h1>${name} <small>${ticker}</small></h1>
     <p>${description}</p>
-    <p style="margin-top:16px">
-      <a class="btn" href="${telegram||'#'}" target="_blank" rel="noopener">Join Telegram</a>
-      <a class="btn" href="${twitter||'#'}" target="_blank" rel="noopener">Follow X</a>
-    </p>
+    <p style="margin-top:16px"><a class="cta" href="${telegram||'#'}" target="_blank" rel="noopener">Join Telegram</a>
+    <a class="cta" href="${twitter||'#'}" target="_blank" rel="noopener">Follow X</a></p>
   </div>
 </section>
-<div class="wrap">
-  <div class="grid">
-    <div class="card"><h3>Fast</h3><p>Generate and publish your site quickly.</p></div>
-    <div class="card"><h3>Customizable</h3><p>Tweak colors and copy to fit your brand.</p></div>
-    <div class="card"><h3>Reliable</h3><p>Clean HTML, responsive, and accessible.</p></div>
-  </div>
+
+<div class="wrap" style="margin-top:24px">
+  <div class="grid">${featCards}</div>
 </div>
+
 <footer>© ${new Date().getFullYear()} ${name}</footer>
 </body>
 </html>`;
