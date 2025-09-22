@@ -1,3 +1,4 @@
+// index.js
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -6,156 +7,164 @@ import fs from 'fs';
 import path from 'path';
 import archiver from 'archiver';
 import { fileURLToPath } from 'url';
+import mime from 'mime-types';
 import { generateIndexHtml } from './openai.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ====== App & CORS ======
 const app = express();
 const PORT = process.env.PORT || 5050;
 
-// ===== CORS =====
 const originsEnv = process.env.CORS_ORIGINS || '*';
-const corsOptions =
-  originsEnv === '*'
-    ? { origin: true }
-    : {
-        origin: function (origin, callback) {
-          const allowed = originsEnv.split(',').map((s) => s.trim());
-          if (!origin || allowed.includes(origin)) return callback(null, true);
-          callback(new Error('Not allowed by CORS'));
-        },
-        credentials: true,
-      };
+const corsOptions = originsEnv === '*'
+  ? { origin: true }
+  : {
+      origin: function (origin, callback) {
+        const allowed = originsEnv.split(',').map(s => s.trim());
+        if (!origin || allowed.includes(origin)) return callback(null, true);
+        callback(new Error('Not allowed by CORS'));
+      },
+      credentials: true
+    };
+
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '15mb' }));
 
-// ===== Uploads =====
+// ====== Uploads ======
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, UPLOAD_DIR);
-  },
-  filename: function (req, file, cb) {
-    const base = (file.originalname || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${Date.now()}-${base}`);
-  },
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const base = Date.now() + '-' + (file.originalname || 'file');
+    cb(null, base.replace(/[^a-zA-Z0-9._-]/g, '_'));
+  }
 });
 const upload = multer({ storage });
 
+// Serve files
 app.use('/uploads', express.static(UPLOAD_DIR));
 
-// ===== Helpers =====
-const PUBLIC_UPLOAD_BASE =
-  process.env.PUBLIC_UPLOAD_BASE || `https://api.useobrixlabs.com`;
-
-function toPublicUrl(p) {
-  if (!p) return '';
-  if (/^https?:\/\//i.test(p)) return p;
-  if (!p.startsWith('/')) p = '/' + p;
-  // contoh: /uploads/xxx.jpg -> https://api.useobrixlabs.com/uploads/xxx.jpg
-  return `${PUBLIC_UPLOAD_BASE}${p}`;
+// ====== Utils ======
+function toPublicUrl(req, rel) {
+  if (!rel) return '';
+  if (/^https?:\/\//i.test(rel)) return rel;
+  if (rel.startsWith('/uploads/')) {
+    // bangun absolute host dari request
+    const base = `${req.protocol}://${req.get('host')}`;
+    return base + rel;
+  }
+  return rel;
 }
 
-function stripCodeFences(html) {
-  if (!html) return html;
-  let out = html.replace(/^\s*```(?:html)?\s*/i, '');
-  out = out.replace(/\s*```+\s*$/i, '');
-  return out;
+function stripCodeFences(s) {
+  if (!s) return s;
+  // buang ```html … ```
+  return String(s)
+    .replace(/^[\s`]*html\b/i, '')
+    .replace(/```/g, '')
+    .trim();
 }
 
 function readAsDataUri(absPath) {
-  if (!fs.existsSync(absPath)) return null;
-  const buf = fs.readFileSync(absPath);
-  const ext = path.extname(absPath).toLowerCase();
-  const mime =
-    ext === '.png'
-      ? 'image/png'
-      : ext === '.jpg' || ext === '.jpeg'
-      ? 'image/jpeg'
-      : ext === '.gif'
-      ? 'image/gif'
-      : ext === '.webp'
-      ? 'image/webp'
-      : ext === '.svg'
-      ? 'image/svg+xml'
-      : 'application/octet-stream';
-  return `data:${mime};base64,${buf.toString('base64')}`;
+  try {
+    if (!absPath || !fs.existsSync(absPath)) return '';
+    const buf = fs.readFileSync(absPath);
+    const ext = path.extname(absPath).slice(1) || 'png';
+    const mt = mime.lookup(ext) || 'application/octet-stream';
+    return `data:${mt};base64,${buf.toString('base64')}`;
+  } catch {
+    return '';
+  }
 }
 
 /**
- * Sisipkan logo & background meski model tidak taruh sendiri.
- * - preview: pakai dataURI (agar pasti tampil)
- * - zip/publish: pakai ./assets/...
+ * Inline SEMUA kemunculan /uploads/... menjadi data:uri (agar preview selalu tampil).
+ */
+function inlineUploadsAsDataUri(html) {
+  let out = String(html || '');
+  // src="/uploads/..."
+  out = out.replace(/src=["'](\/uploads\/[^"']+)["']/gi, (m, rel) => {
+    const abs = path.join(UPLOAD_DIR, path.basename(rel));
+    const data = readAsDataUri(abs);
+    return data ? `src="${data}"` : m;
+  });
+  // url(/uploads/...)
+  out = out.replace(/url\((['"]?)(\/uploads\/[^)'"]+)\1\)/gi, (m, q, rel) => {
+    const abs = path.join(UPLOAD_DIR, path.basename(rel));
+    const data = readAsDataUri(abs);
+    return data ? `url(${data})` : m;
+  });
+  return out;
+}
+
+/**
+ * Paksa logo & background muncul.
+ * - Preview: pakai data URI (tidak tergantung jaringan).
+ * - ZIP: pakai path relatif ./assets/...
+ * - Tambah body::before agar background SELALU terlihat.
  */
 function injectAssets(html, { logoUrl, backgroundUrl, bgColor = '#0b0b0b' }, mode) {
   let out = String(html || '');
 
-  // Pastikan <head> & </body> ada
+  // pastikan <head> dan </body> ada
   if (!/<\/head>/i.test(out)) out = out.replace(/<html[^>]*>/i, '$&\n<head></head>');
   if (!/<\/body>/i.test(out)) out = out.replace(/<\/head>/i, '</head>\n<body>\n</body>');
 
-  // Tambah CSS variables bila belum ada
-  const cssVar = `:root{--obrix-bg-color:${bgColor};}`;
+  // var dasar
   if (!out.includes('--obrix-bg-color')) {
-    out = out.replace(
-      /<\/head>/i,
-      `<style>${cssVar}</style>\n</head>`
-    );
+    out = out.replace(/<\/head>/i, `<style>:root{--obrix-bg-color:${bgColor};}</style>\n</head>`);
   }
 
-  // ===== Background =====
+  // ===== background =====
   if (backgroundUrl) {
     let bgRef = '';
     if (mode === 'preview') {
       const abs = path.join(UPLOAD_DIR, path.basename(backgroundUrl));
-      const dataUri = readAsDataUri(abs);
-      if (dataUri) bgRef = `url("${dataUri}")`;
+      bgRef = readAsDataUri(abs);
     } else {
-      // zip / publish
-      bgRef = `url("./assets/${path.basename(backgroundUrl)}")`;
+      bgRef = `./assets/${path.basename(backgroundUrl)}`;
     }
-
     if (bgRef) {
-      if (!/background-image\s*:/i.test(out)) {
-        // sisipkan di head
-        out = out.replace(
-          /<\/head>/i,
-          `<style>body{background:${bgColor};background-image:${bgRef};background-size:cover;background-position:center;background-repeat:no-repeat;}</style>\n</head>`
-        );
-      } else {
-        // ganti yang ada (opsional)
-        out = out.replace(
-          /background-image\s*:\s*[^;]+;/i,
-          `background-image:${bgRef};`
-        );
-      }
+      const cssBg = `
+html,body{height:100%;}
+body{background-color:var(--obrix-bg-color) !important;}
+body::before{
+  content:"";
+  position:fixed;
+  inset:0;
+  z-index:-1;
+  background-image:url("${bgRef}");
+  background-size:cover;
+  background-position:center;
+  background-repeat:no-repeat;
+  opacity:1;
+  pointer-events:none;
+}
+`;
+      out = out.replace(/<\/head>/i, `<style>${cssBg}</style>\n</head>`);
     }
   }
 
-  // ===== Logo =====
+  // ===== logo =====
   if (logoUrl) {
-    let logoTag = '';
+    let tag = '';
     if (mode === 'preview') {
       const abs = path.join(UPLOAD_DIR, path.basename(logoUrl));
-      const dataUri = readAsDataUri(abs);
-      if (dataUri) {
-        logoTag = `<img src="${dataUri}" alt="Logo" class="site-logo" style="height:56px;width:auto;display:block;margin:0 auto 16px;" />`;
-      }
+      const data = readAsDataUri(abs);
+      if (data) tag = `<img src="${data}" alt="Logo" class="site-logo" style="height:56px;width:auto;display:block;margin:0 auto 16px;" />`;
     } else {
-      logoTag = `<img src="./assets/${path.basename(
-        logoUrl
-      )}" alt="Logo" class="site-logo" style="height:56px;width:auto;display:block;margin:0 auto 16px;" />`;
+      tag = `<img src="./assets/${path.basename(logoUrl)}" alt="Logo" class="site-logo" style="height:56px;width:auto;display:block;margin:0 auto 16px;" />`;
     }
 
-    if (logoTag) {
+    if (tag) {
       if (out.includes('<!--OBRIX_LOGO_HERE-->')) {
-        out = out.replace('<!--OBRIX_LOGO_HERE-->', logoTag);
+        out = out.replace('<!--OBRIX_LOGO_HERE-->', tag);
       } else if (!/class=["']site-logo["']/.test(out)) {
-        // taruh di dekat awal body
-        out = out.replace(/<body[^>]*>/i, `$&\n${logoTag}`);
+        out = out.replace(/<body[^>]*>/i, `$&\n${tag}`);
       }
     }
   }
@@ -163,108 +172,50 @@ function injectAssets(html, { logoUrl, backgroundUrl, bgColor = '#0b0b0b' }, mod
   return out;
 }
 
-/** Inline semua /uploads/... yg tersisa jadi data URI (backup) */
-function inlineUploadsAsDataUri(html) {
-  const collect = new Set();
-
-  html.replace(/(src|href|poster)=["'](\/uploads\/[^"']+)["']/gi, (m, a, p) => {
-    collect.add(p);
-    return m;
-  });
-  html.replace(/url\((['"]?)(\/uploads\/[^"')]+)\1\)/gi, (m, q, p) => {
-    collect.add(p);
-    return m;
-  });
-  html.replace(/srcset=["']([^"']+)["']/gi, (m, list) => {
-    list.split(',').forEach((item) => {
-      const u = item.trim().split(/\s+/)[0];
-      if (u && u.startsWith('/uploads/')) collect.add(u);
-    });
-    return m;
-  });
-
-  let out = html;
-  for (const p of collect) {
-    const abs = path.join(UPLOAD_DIR, path.basename(p));
-    const dataUri = readAsDataUri(abs);
-    if (!dataUri) continue;
-
-    // src/href/poster
-    out = out.replace(
-      new RegExp(`(src|href|poster)=["']${p.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}["']`, 'gi'),
-      (m, attr) => `${attr}="${dataUri}"`
-    );
-    // CSS url(...)
-    out = out
-      .replace(
-        new RegExp(`url\\((['"])${p.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\1\\)`, 'gi'),
-        (m, q) => `url(${q}${dataUri}${q})`
-      )
-      .replace(
-        new RegExp(`url\\(${p.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\)`, 'gi'),
-        () => `url(${dataUri})`
-      );
-    // srcset
-    out = out.replace(
-      new RegExp(`(\\s|,|^)${p.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}(\\s|,|$)`, 'gi'),
-      (m, b, a) => `${b}${dataUri}${a}`
-    );
-  }
-  return out;
-}
-
-// ===== Routes =====
+// ====== Routes ======
 app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'obrix-website-generator', time: new Date().toISOString() });
 });
 
-// upload logo
+// Upload endpoints (opsional — front-end boleh pakai /api/upload-logo saja)
 app.post('/api/upload-logo', upload.single('logo'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const rel = `/uploads/${req.file.filename}`;
-  res.json({ ok: true, path: rel, url: toPublicUrl(rel) });
+  res.json({ ok: true, path: rel, url: toPublicUrl(req, rel) });
 });
-
-// upload background
 app.post('/api/upload-background', upload.single('background'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const rel = `/uploads/${req.file.filename}`;
-  res.json({ ok: true, path: rel, url: toPublicUrl(rel) });
+  res.json({ ok: true, path: rel, url: toPublicUrl(req, rel) });
 });
 
-// Generate (PREVIEW) – gambar di-inline sebagai data URI
+// Generate preview HTML
 app.post('/api/generate', async (req, res) => {
   try {
     const {
-      name,
-      ticker,
-      description,
-      logoUrl,
-      backgroundUrl,
-      theme = 'dark',
-      accent = '#7c3aed',
-      layout = 'hero',
-      bgColor = '#0b0b0b',
+      name, ticker, description,
+      theme = 'dark', accent = '#7c3aed', layout = 'hero',
+      bgColor = '#0b0b0b'
     } = req.body || {};
 
     if (!name || !ticker || !description) {
       return res.status(400).json({ error: 'name, ticker, description are required' });
     }
 
+    // terima berbagai nama field
+    const logoRel = req.body.logoUrl || req.body.logoPath || req.body.logo || '';
+    const bgRel   = req.body.backgroundUrl || req.body.backgroundPath || req.body.background || '';
+
+    const logoForAi = toPublicUrl(req, logoRel);
+    const bgForAi   = toPublicUrl(req, bgRel);
+
     let htmlRaw = await generateIndexHtml({
-      name,
-      ticker,
-      description,
-      logoUrl: toPublicUrl(logoUrl || ''),
-      backgroundUrl: toPublicUrl(backgroundUrl || ''),
-      theme,
-      accent,
-      layout,
-      bgColor,
+      name, ticker, description, theme, accent, layout,
+      logoUrl: logoForAi, backgroundUrl: bgForAi, bgColor
     });
 
     let html = stripCodeFences(htmlRaw);
-    html = injectAssets(html, { logoUrl, backgroundUrl, bgColor }, 'preview');
+    html = injectAssets(html, { logoUrl: logoRel, backgroundUrl: bgRel, bgColor }, 'preview');
     html = inlineUploadsAsDataUri(html);
 
     res.json({ ok: true, html });
@@ -274,39 +225,32 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
-// Generate ZIP – gambar ke ./assets/ dan referensi diubah
+// Generate ZIP (index.html + assets/)
 app.post('/api/generate-zip', async (req, res) => {
   try {
     const {
-      name,
-      ticker,
-      description,
-      logoUrl,
-      backgroundUrl,
-      theme = 'dark',
-      accent = '#7c3aed',
-      layout = 'hero',
-      bgColor = '#0b0b0b',
+      name, ticker, description,
+      theme = 'dark', accent = '#7c3aed', layout = 'hero',
+      bgColor = '#0b0b0b'
     } = req.body || {};
 
     if (!name || !ticker || !description) {
       return res.status(400).json({ error: 'name, ticker, description are required' });
     }
 
+    const logoRel = req.body.logoUrl || req.body.logoPath || req.body.logo || '';
+    const bgRel   = req.body.backgroundUrl || req.body.backgroundPath || req.body.background || '';
+
+    const logoForZip = logoRel ? ('./assets/' + path.basename(logoRel)) : '';
+    const bgForZip   = bgRel   ? ('./assets/' + path.basename(bgRel))   : '';
+
     let htmlRaw = await generateIndexHtml({
-      name,
-      ticker,
-      description,
-      logoUrl: './assets/' + (logoUrl ? path.basename(logoUrl) : ''),
-      backgroundUrl: './assets/' + (backgroundUrl ? path.basename(backgroundUrl) : ''),
-      theme,
-      accent,
-      layout,
-      bgColor,
+      name, ticker, description, theme, accent, layout,
+      logoUrl: logoForZip, backgroundUrl: bgForZip, bgColor
     });
 
     let html = stripCodeFences(htmlRaw);
-    html = injectAssets(html, { logoUrl, backgroundUrl, bgColor }, 'zip');
+    html = injectAssets(html, { logoUrl: logoRel, backgroundUrl: bgRel, bgColor }, 'zip');
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader(
@@ -315,25 +259,20 @@ app.post('/api/generate-zip', async (req, res) => {
     );
 
     const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => {
-      throw err;
-    });
+    archive.on('error', (err) => { throw err; });
     archive.pipe(res);
 
+    // index.html
     archive.append(html, { name: 'index.html' });
 
-    // Tambah assets jika ada
-    if (logoUrl && logoUrl.startsWith('/uploads/')) {
-      const abs = path.join(UPLOAD_DIR, path.basename(logoUrl));
-      if (fs.existsSync(abs)) {
-        archive.file(abs, { name: `assets/${path.basename(abs)}` });
-      }
+    // assets (jika ada)
+    if (logoRel) {
+      const abs = path.join(UPLOAD_DIR, path.basename(logoRel));
+      if (fs.existsSync(abs)) archive.file(abs, { name: `assets/${path.basename(abs)}` });
     }
-    if (backgroundUrl && backgroundUrl.startsWith('/uploads/')) {
-      const abs = path.join(UPLOAD_DIR, path.basename(backgroundUrl));
-      if (fs.existsSync(abs)) {
-        archive.file(abs, { name: `assets/${path.basename(abs)}` });
-      }
+    if (bgRel) {
+      const abs = path.join(UPLOAD_DIR, path.basename(bgRel));
+      if (fs.existsSync(abs)) archive.file(abs, { name: `assets/${path.basename(abs)}` });
     }
 
     await archive.finalize();
@@ -343,7 +282,7 @@ app.post('/api/generate-zip', async (req, res) => {
   }
 });
 
-// listen di 0.0.0.0 (untuk Render)
+// listen 0.0.0.0 (Render/hosting)
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Backend running on http://0.0.0.0:${PORT}`);
 });
