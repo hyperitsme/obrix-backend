@@ -1,9 +1,9 @@
 {
   "name": "obrixlabs-generator-api",
-  "version": "1.0.0",
-  "description": "API for generating and serving single-file websites for Obrix Labs.",
-  "main": "index.js",
+  "version": "1.1.0",
+  "description": "AI website generator API for Obrix Labs (returns single-file index.html).",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
@@ -12,6 +12,6 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "nanoid": "^5.0.7",
-    "openai": "^4.58.1" 
+    "openai": "^4.58.1"
   }
 }
