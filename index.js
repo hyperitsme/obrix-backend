@@ -1,278 +1,168 @@
-// index.js
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import multer from 'multer';
-import fs from 'fs';
-import path from 'path';
-import archiver from 'archiver';
-import { fileURLToPath } from 'url';
-import mime from 'mime-types';
-import crypto from 'crypto';
-import { generateIndexHtml } from './openai.js';
+// openai.js
+import OpenAI from "openai";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+/**
+ * Generate a complete single-file index.html from user payload.
+ * The model is instructed to:
+ * - Return ONLY valid HTML (no markdown).
+ * - Inline ALL CSS & JS (no external requests).
+ * - Use provided assets/colors/socials.
+ * - English copywriting, accessible, responsive.
+ * - Do not mention how it was generated.
+ */
+export async function generateSiteHTML(payload) {
+  const {
+    name,
+    ticker,
+    description,
+    telegram,
+    twitter,
+    colors,
+    assets
+  } = payload;
 
-// ===== App & CORS =====
-const app = express();
-const PORT = process.env.PORT || 5050;
-
-const originsEnv = process.env.CORS_ORIGINS || '*';
-const corsOptions = originsEnv === '*'
-  ? { origin: true }
-  : {
-      origin(origin, cb) {
-        const allowed = originsEnv.split(',').map(s => s.trim());
-        if (!origin || allowed.includes(origin)) return cb(null, true);
-        cb(new Error('Not allowed by CORS'));
-      },
-      credentials: true,
-    };
-
-app.use(cors(corsOptions));
-app.use(express.json({ limit: '15mb' }));
-
-// ===== Directories =====
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-const PREVIEWS_DIR = path.join(__dirname, 'previews');
-for (const d of [UPLOAD_DIR, PREVIEWS_DIR]) {
-  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-}
-
-// ===== Multer (upload) =====
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const base = Date.now() + '-' + (file.originalname || 'file');
-    cb(null, base.replace(/[^a-zA-Z0-9._-]/g, '_'));
-  },
-});
-const upload = multer({ storage });
-
-// ===== Helpers =====
-function toPublicUrl(req, rel) {
-  if (!rel) return '';
-  if (/^https?:\/\//i.test(rel)) return rel;
-  if (rel.startsWith('/uploads/')) {
-    const base = `${req.protocol}://${req.get('host')}`;
-    return base + rel;
-  }
-  return rel;
-}
-function stripCodeFences(s) {
-  return String(s || '')
-    .replace(/```html|```/g, '')
-    .replace(/^[\s`]*html\b/i, '')
-    .trim();
-}
-function readAsDataUri(absPath) {
-  try {
-    if (!absPath || !fs.existsSync(absPath)) return '';
-    const buf = fs.readFileSync(absPath);
-    const ext = path.extname(absPath).slice(1) || 'png';
-    const mt = mime.lookup(ext) || 'application/octet-stream';
-    return `data:${mt};base64,${buf.toString('base64')}`;
-  } catch {
-    return '';
-  }
-}
-function inlineUploadsAsDataUri(html) {
-  let out = String(html || '');
-  out = out.replace(/src=["'](\/uploads\/[^"']+)["']/gi, (m, rel) => {
-    const abs = path.join(UPLOAD_DIR, path.basename(rel));
-    const data = readAsDataUri(abs);
-    return data ? `src="${data}"` : m;
+  const client = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY
   });
-  out = out.replace(/url\((['"]?)(\/uploads\/[^)'"]+)\1\)/gi, (m, q, rel) => {
-    const abs = path.join(UPLOAD_DIR, path.basename(rel));
-    const data = readAsDataUri(abs);
-    return data ? `url(${data})` : m;
-  });
-  return out;
-}
-function injectAssets(html, { logoUrl, backgroundUrl, bgColor = '#0b0b0b' }, mode) {
-  let out = String(html || '');
 
-  if (!/<\/head>/i.test(out)) out = out.replace(/<html[^>]*>/i, '$&\n<head></head>');
-  if (!/<\/body>/i.test(out)) out = out.replace(/<\/head>/i, '</head>\n<body>\n</body>');
+  const system = [
+    "You are an expert landing-page designer & front-end engineer.",
+    "Return a COMPLETE, VALID single-file index.html.",
+    "Inline all CSS & JS (no external fonts/scripts/iframes).",
+    "Use semantic HTML, A11y, responsive design.",
+    "Use CSS variables; system fonts.",
+    "Respect theme colors (primary/accent) provided.",
+    "Use provided data URLs for the logo/background if present.",
+    "Include hero, features, call-to-action, socials, and footer.",
+    "Include tasteful hover states and micro-interactions.",
+    "Keep the copy in English; concise and convincing.",
+    "Do NOT mention anything about prompts, models, or how it was generated."
+  ].join(" ");
 
-  if (!out.includes('--obrix-bg-color')) {
-    out = out.replace(/<\/head>/i, `<style>:root{--obrix-bg-color:${bgColor};}</style>\n</head>`);
-  }
+  const user = {
+    name,
+    ticker,
+    description,
+    telegram,
+    twitter,
+    primaryColor: colors?.primary || "#3b82f6",
+    accentColor: colors?.accent || "#2563eb",
+    logoDataUrl: assets?.logo || "",
+    backgroundDataUrl: assets?.background || ""
+  };
 
-  // background
-  if (backgroundUrl) {
-    let bgRef = '';
-    if (mode === 'preview') {
-      const abs = path.join(UPLOAD_DIR, path.basename(backgroundUrl));
-      bgRef = readAsDataUri(abs);
-    } else {
-      bgRef = `./assets/${path.basename(backgroundUrl)}`;
-    }
-    if (bgRef) {
-      const cssBg = `
-html,body{height:100%;}
-body{background-color:var(--obrix-bg-color) !important;}
-body::before{
-  content:"";
-  position:fixed; inset:0; z-index:-1;
-  background-image:url("${bgRef}");
-  background-size:cover; background-position:center; background-repeat:no-repeat;
-  pointer-events:none;
-}
+  const prompt = `
+Build a polished, modern landing page for a crypto/web3 project.
+
+REQUIREMENTS
+- Title: ${name} ${ticker ? `(${ticker})` : ""}
+- Short description: ${description}
+- Primary color: ${user.primaryColor}, Accent color: ${user.accentColor}
+- Logo data URL (if given): ${user.logoDataUrl ? "[PROVIDED]" : "[NONE]"}
+- Background image data URL (if given): ${user.backgroundDataUrl ? "[PROVIDED]" : "[NONE]"}
+- Social links:
+  - Telegram: ${telegram || "N/A"}
+  - X/Twitter: ${twitter || "N/A"}
+
+STRUCTURE
+- Sticky header with logo + nav + CTA
+- Hero with background image (if provided), logo (if provided), headline, subhead, CTA buttons
+- 3-6 feature cards (hover interactions)
+- Optional sections: About / Roadmap / FAQs (short)
+- Social buttons (Telegram, X)
+- Footer with © and simple links
+
+TECH SPECS
+- Use a :root { --primary: ; --accent: ; } and system font stack
+- Inline CSS/JS only. No external requests.
+- Accessible, high-contrast, keyboard friendly
+- Mobile-first responsive
+- Include a small <script> for any minor interactions
+- DO NOT output anything except the final HTML.
 `;
-      out = out.replace(/<\/head>/i, `<style>${cssBg}</style>\n</head>`);
-    }
+
+  const model = process.env.MODEL || "gpt-4o-mini";
+
+  // Use Responses API; robust extraction of the text output
+  const res = await client.responses.create({
+    model,
+    input: [
+      { role: "system", content: system },
+      { role: "user", content: JSON.stringify(user) },
+      { role: "user", content: prompt }
+    ]
+  });
+
+  // Try the convenience field first; fallback to traversing output array
+  let html = res.output_text;
+  if (!html) {
+    try {
+      const parts = res.output?.[0]?.content || [];
+      const textPart = parts.find(p => p.type === "output_text" || p.type === "text");
+      html = textPart?.text || "";
+    } catch {}
   }
-
-  // logo
-  if (logoUrl) {
-    let tag = '';
-    if (mode === 'preview') {
-      const abs = path.join(UPLOAD_DIR, path.basename(logoUrl));
-      const data = readAsDataUri(abs);
-      if (data) tag = `<img src="${data}" alt="Logo" class="site-logo" style="height:56px;width:auto;display:block;margin:0 auto 16px;" />`;
-    } else {
-      tag = `<img src="./assets/${path.basename(logoUrl)}" alt="Logo" class="site-logo" style="height:56px;width:auto;display:block;margin:0 auto 16px;" />`;
-    }
-
-    if (tag) {
-      if (out.includes('<!--OBRIX_LOGO_HERE-->')) {
-        out = out.replace('<!--OBRIX_LOGO_HERE-->', tag);
-      } else if (!/class=["']site-logo["']/.test(out)) {
-        out = out.replace(/<body[^>]*>/i, `$&\n${tag}`);
-      }
-    }
+  if (typeof html !== "string" || !html.trim().startsWith("<")) {
+    throw new Error("Model did not return HTML.");
   }
-
-  return out;
-}
-function absoluteBase(req) {
-  return `${req.protocol}://${req.get('host')}`;
+  return html.trim();
 }
 
-// ===== Routes =====
-app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'obrix-website-generator', time: new Date().toISOString() });
-});
+/**
+ * Minimal local fallback HTML (used if model call fails).
+ */
+export function fallbackHTML(p) {
+  const {
+    name = "Untitled Project",
+    ticker = "$TOKEN",
+    description = "Your project description.",
+    telegram = "#",
+    twitter = "#",
+    colors = { primary: "#3b82f6", accent: "#2563eb" },
+    assets = { logo: "", background: "" }
+  } = p;
 
-// uploads
-app.use('/uploads', express.static(UPLOAD_DIR));
-app.post('/api/upload-logo', upload.single('logo'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const rel = `/uploads/${req.file.filename}`;
-  res.json({ ok: true, path: rel, url: toPublicUrl(req, rel) });
-});
-app.post('/api/upload-background', upload.single('background'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const rel = `/uploads/${req.file.filename}`;
-  res.json({ ok: true, path: rel, url: toPublicUrl(req, rel) });
-});
-
-// ========= NEW: Shareable preview =========
-// Serve saved previews: /preview/:id
-app.get('/preview/:id', (req, res) => {
-  const id = (req.params.id || '').replace(/[^a-zA-Z0-9_-]/g, '');
-  const file = path.join(PREVIEWS_DIR, `${id}.html`);
-  if (!fs.existsSync(file)) return res.status(404).send('Not found');
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.sendFile(file);
-});
-
-// Generate (preview + shareUrl)
-app.post('/api/generate', async (req, res) => {
-  try {
-    const {
-      name, ticker, description,
-      theme = 'dark', accent = '#7c3aed', layout = 'hero',
-      bgColor = '#0b0b0b'
-    } = req.body || {};
-
-    if (!name || !ticker || !description) {
-      return res.status(400).json({ error: 'name, ticker, description are required' });
-    }
-
-    const logoRel = req.body.logoUrl || req.body.logoPath || req.body.logo || '';
-    const bgRel   = req.body.backgroundUrl || req.body.backgroundPath || req.body.background || '';
-
-    const logoForAi = toPublicUrl(req, logoRel);
-    const bgForAi   = toPublicUrl(req, bgRel);
-
-    let htmlRaw = await generateIndexHtml({
-      name, ticker, description, theme, accent, layout,
-      logoUrl: logoForAi, backgroundUrl: bgForAi, bgColor
-    });
-
-    let html = stripCodeFences(htmlRaw);
-    html = injectAssets(html, { logoUrl: logoRel, backgroundUrl: bgRel, bgColor }, 'preview');
-    html = inlineUploadsAsDataUri(html);
-
-    // simpan ke file agar bisa dishare via URL
-    const id = crypto.randomBytes(10).toString('hex'); // 20 hex chars
-    const previewFile = path.join(PREVIEWS_DIR, `${id}.html`);
-    fs.writeFileSync(previewFile, html, 'utf8');
-
-    const previewUrl = `${absoluteBase(req)}/preview/${id}`;
-    res.json({ ok: true, html, previewUrl });
-  } catch (err) {
-    console.error('Generate error:', err);
-    res.status(500).json({ error: err.message || 'Failed to generate HTML' });
-  }
-});
-
-// Generate ZIP
-app.post('/api/generate-zip', async (req, res) => {
-  try {
-    const {
-      name, ticker, description,
-      theme = 'dark', accent = '#7c3aed', layout = 'hero',
-      bgColor = '#0b0b0b'
-    } = req.body || {};
-
-    if (!name || !ticker || !description) {
-      return res.status(400).json({ error: 'name, ticker, description are required' });
-    }
-
-    const logoRel = req.body.logoUrl || req.body.logoPath || req.body.logo || '';
-    const bgRel   = req.body.backgroundUrl || req.body.backgroundPath || req.body.background || '';
-
-    const logoForZip = logoRel ? ('./assets/' + path.basename(logoRel)) : '';
-    const bgForZip   = bgRel   ? ('./assets/' + path.basename(bgRel))   : '';
-
-    let htmlRaw = await generateIndexHtml({
-      name, ticker, description, theme, accent, layout,
-      logoUrl: logoForZip, backgroundUrl: bgForZip, bgColor
-    });
-
-    let html = stripCodeFences(htmlRaw);
-    html = injectAssets(html, { logoUrl: logoRel, backgroundUrl: bgRel, bgColor }, 'zip');
-
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition',
-      `attachment; filename="${(name || 'site').replace(/[^a-z0-9_-]/gi, '_')}.zip"`);
-
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => { throw err; });
-    archive.pipe(res);
-
-    archive.append(html, { name: 'index.html' });
-    if (logoRel) {
-      const abs = path.join(UPLOAD_DIR, path.basename(logoRel));
-      if (fs.existsSync(abs)) archive.file(abs, { name: `assets/${path.basename(abs)}` });
-    }
-    if (bgRel) {
-      const abs = path.join(UPLOAD_DIR, path.basename(bgRel));
-      if (fs.existsSync(abs)) archive.file(abs, { name: `assets/${path.basename(abs)}` });
-    }
-
-    await archive.finalize();
-  } catch (err) {
-    console.error('ZIP error:', err);
-    res.status(500).json({ error: err.message || 'Failed to create ZIP' });
-  }
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Backend running on http://0.0.0.0:${PORT}`);
-});
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>${name} ${ticker}</title>
+<style>
+:root{--primary:${colors.primary};--accent:${colors.accent}}
+*{box-sizing:border-box}html,body{margin:0}
+body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial;color:#e8ebf5;background:#0b0f1a}
+.hero{min-height:62vh;display:grid;place-items:center;text-align:center;padding:40px;
+  background:${assets.background ? `url('${assets.background}') center/cover no-repeat` : `linear-gradient(135deg,var(--primary),var(--accent))`}}
+.wrap{max-width:900px;margin:0 auto;padding:24px}
+.logo{width:84px;height:84px;border-radius:20px;box-shadow:0 0 0 6px #ffffff22;margin:0 auto 16px;display:block}
+.btn{display:inline-block;padding:12px 16px;border-radius:12px;border:1px solid #ffffff55;background:#00000033;color:#fff;text-decoration:none;margin:6px}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(3,1fr)}@media(max-width:820px){.grid{grid-template-columns:1fr}}
+.card{background:#ffffff10;border:1px solid #ffffff2a;border-radius:14px;padding:16px;transition:.2s}
+.card:hover{transform:translateY(-4px);box-shadow:0 16px 40px -18px rgba(59,130,246,.35)}
+footer{color:#aab3d0;text-align:center;padding:24px;border-top:1px solid #ffffff18}
+</style>
+</head>
+<body>
+<section class="hero">
+  <div class="wrap">
+    ${assets.logo ? `<img class="logo" alt="logo" src="${assets.logo}"/>` : ""}
+    <h1>${name} <small>${ticker}</small></h1>
+    <p>${description}</p>
+    <p style="margin-top:16px">
+      <a class="btn" href="${telegram||'#'}" target="_blank" rel="noopener">Join Telegram</a>
+      <a class="btn" href="${twitter||'#'}" target="_blank" rel="noopener">Follow X</a>
+    </p>
+  </div>
+</section>
+<div class="wrap">
+  <div class="grid">
+    <div class="card"><h3>Fast</h3><p>Generate and publish your site quickly.</p></div>
+    <div class="card"><h3>Customizable</h3><p>Tweak colors and copy to fit your brand.</p></div>
+    <div class="card"><h3>Reliable</h3><p>Clean HTML, responsive, and accessible.</p></div>
+  </div>
+</div>
+<footer>© ${new Date().getFullYear()} ${name}</footer>
+</body>
+</html>`;
+}
