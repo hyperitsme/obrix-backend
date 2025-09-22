@@ -1,19 +1,18 @@
-// openai.js
 import OpenAI from 'openai';
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// contoh default model; bisa ganti di Render ENV: MODEL
+// kamu bisa ganti sesuai preferensi
 const MODEL = process.env.MODEL || 'gpt-4.1-mini';
 
 export async function generateIndexHtml({
   name,
   ticker,
   description,
-  logoUrl,        // boleh kosong
-  backgroundUrl,  // boleh kosong
+  logoUrl,
+  backgroundUrl,
   theme = 'dark',
   accent = '#7c3aed',
   layout = 'hero',
@@ -21,54 +20,50 @@ export async function generateIndexHtml({
 }) {
   const system = [
     'You are an expert landing-page designer & front-end engineer.',
-    'Return a COMPLETE, VALID, SINGLE-FILE index.html.',
-    'Inline ALL CSS and JS (no external network requests).',
-    'Use semantic HTML, accessible ARIA, responsive design.',
-    'Use CSS variables for theming (e.g., --accent, --bg).',
-    'If a logo URL is provided, include it via <img> with proper alt.',
-    'If a background image URL is provided, use it as a hero/section background with CSS background-image.',
-    'Otherwise, respect bgColor for body background.',
-    'Include sections: Hero, About/Story, Token/Ticker highlight, Features/Utilities, Roadmap (minimal), Social/CTA placeholders.',
-    'Include a "Copy Ticker" button and a floating "Back to top" button.',
-    'Include sensible meta tags (title, description, og: tags).',
-    'No analytics, no external scripts, no iframes, no remote fonts/icons.',
+    'Return a COMPLETE, VALID **single-file** index.html.',
+    'Inline all CSS & JS (no external requests).',
+    'Use semantic HTML, A11y, responsive design.',
+    'Use CSS variables; default system fonts.',
+    'Respect `theme` (dark/light) and `accent` color.',
+    'Do not include analytics/external scripts/iframes/webfonts.',
+    'If placeholders exist <!--OBRIX_LOGO_HERE-->, put the logo <img> there.',
+    'If not, still render a hero section that looks great even without assets.',
   ].join('\n');
 
   const user = `
-Project Name: ${name}
+Project: ${name}
 Ticker: ${ticker}
 Theme: ${theme}
 Accent: ${accent}
-Layout: ${layout}
-Logo URL: ${logoUrl || 'N/A'}
-Background Image URL: ${backgroundUrl || 'N/A'}
-Background Color (fallback): ${bgColor}
+Background Color: ${bgColor}
+Layout Preference: ${layout}
+Provided Logo URL (may be data URI or regular URL): ${logoUrl || 'N/A'}
+Provided Background URL (may be data URI or regular URL): ${backgroundUrl || 'N/A'}
 
-Description (marketing tone):
+Description:
 ${description}
 
-Strict Requirements:
-- Single HTML file only.
-- Put minimal CSS in <style> and minimal JS in <script> at the end (copy ticker, smooth scroll, optional theme toggle).
-- Prefer CSS variables: --accent for accent color and --bg for background color.
-- If Background Image URL is provided, use it (with overlay if needed); otherwise use the provided bgColor.
-- Ensure images use the URL passed AS-IS (do NOT strip leading slashes), e.g. "/uploads/xxxx.png" should remain that string in the HTML.
+Hard Requirements:
+- Single file HTML.
+- Sections: Hero, About, Token Highlight, Features, Small Roadmap, CTA, Footer.
+- Add "Copy Ticker" button that copies ${ticker} to clipboard.
+- Add "Back to top" floating button.
+- Use CSS variables; minimal JS at end for copy/scroll.
+- Include meta tags (title, description, og: tags) and base64 favicon.
+- Add a comment placeholder <!--OBRIX_LOGO_HERE--> inside the hero header area.
 `;
 
-  // gunakan Responses API (atau Chat Completions—bebas; ini pakai Responses)
-  const resp = await client.responses.create({
+  // Chat Completions (akan tetap mungkin mengeluarkan fences; kita strip di server)
+  const resp = await client.chat.completions.create({
     model: MODEL,
-    input: [
+    messages: [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
+    temperature: 0.7,
   });
 
-  const html =
-    resp.output_text ||
-    resp?.output?.[0]?.content?.find((p) => p.type === 'output_text')?.text ||
-    resp?.output?.[0]?.content?.find((p) => p.type === 'text')?.text;
-
+  const html = resp.choices?.[0]?.message?.content || '';
   if (!html || !String(html).toLowerCase().includes('<html')) {
     throw new Error('Model did not return a valid index.html');
   }
