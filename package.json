@@ -1,26 +1,17 @@
 {
-  "name": "obrix-backend",
-  "version": "1.2.0",
-  "type": "module",
+  "name": "obrixlabs-generator-api",
+  "version": "1.0.0",
+  "description": "API for generating and serving single-file websites for Obrix Labs.",
   "main": "index.js",
-  "engines": {
-    "node": "20.x"
-  },
+  "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "archiver": "^7.0.1",
-    "axios": "^1.7.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1",
-    "openai": "^4.56.0",
-    "ssh2-sftp-client": "^10.0.3"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
+    "nanoid": "^5.0.7",
+    "openai": "^4.58.1" 
   }
 }
