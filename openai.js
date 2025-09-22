@@ -1,184 +1,177 @@
-// openai.js
 import OpenAI from "openai";
 
 /**
- * Minta model mengembalikan 1 file HTML utuh:
- * - Inline CSS & JS
- * - Aksesibilitas & responsive
- * - Menggunakan primary/accent colors
- * - Memakai logo/background (data URL) jika ada
- * - Copywriting harus relevan dg project (no boilerplate)
- * - Jangan menyebut model/prompt di output
+ * Kriteria kualitas yang HARUS dipenuhi:
+ * - Satu file HTML valid (diawali <!doctype html>)
+ * - Tidak ada external request (fonts, scripts, iframes, CDN)
+ * - Tidak ada heading generik: Fast / Customizable / Reliable (case-insensitive)
+ * - Copywriting relevan dengan brief (name, ticker, description)
+ * - Desain profesional: animasi halus (keyframes), hover, tombol playful, warna kaya
  */
-export async function generateSiteHTML(payload) {
+const BANNED_HEADINGS = [/^\s*fast\s*$/i, /^\s*customizable\s*$/i, /^\s*reliable\s*$/i];
+
+function violatesExternal(html) {
+  // blokir resource eksternal
+  return /(https?:)?\/\/(fonts\.|cdnjs|unpkg|cdn\.|googleapis|gstatic|jsdelivr|bootstrap|tailwindcss)/i.test(html)
+      || /\b<link\b[^>]*rel=["']stylesheet/i.test(html)
+      || /\b<script\b[^>]*src=/i.test(html)
+      || /\b@import\b/i.test(html)
+      || /\b<iframe\b/i.test(html);
+}
+
+function hasBannedHeadings(html) {
+  // cari <h1..h6> yang isinya adalah kata generik
+  const matches = [...html.matchAll(/<h[1-6][^>]*>(.*?)<\/h[1-6]>/gis)];
+  return matches.some(m => {
+    const text = (m[1] || "").replace(/<[^>]+>/g, "").trim();
+    return BANNED_HEADINGS.some(rx => rx.test(text));
+  });
+}
+
+function isValidHTML(html) {
+  return typeof html === "string" && /^<!doctype html>/i.test(html.trim());
+}
+
+function buildSystemMessage() {
+  return [
+    "You are a professional web studio (brand copywriter + senior front-end engineer).",
+    "Return ONLY a COMPLETE, VALID single-file index.html as output.",
+    "Inline ALL CSS & JS. Absolutely NO external requests (fonts/scripts/iframes/CDNs).",
+    "Use semantic HTML, accessibile roles, focus-visible, and mobile-first responsive.",
+    "Use CSS variables in :root for colors (primary, accent) and system-ui font stack.",
+    "Design language: modern, colorful, tasteful micro-interactions:",
+    "- animated gradient accents (keyframes), soft shadows, glass + blur",
+    "- playful pill buttons with hover/press feedback",
+    "- card hover lift, animated borders/underlines, subtle parallax in hero",
+    "- high contrast, readable on dark background",
+    "Copywriting MUST be specific to the provided project description.",
+    "Strictly AVOID generic section titles such as “Fast”, “Customizable”, or “Reliable”.",
+    "Do NOT mention prompts, models, or how it was generated anywhere in the HTML."
+  ].join(" ");
+}
+
+function buildPrimaryPrompt(brief) {
   const {
     name,
     ticker,
     description,
     telegram,
     twitter,
-    colors,
-    assets
-  } = payload;
+    primaryColor,
+    accentColor,
+    logoDataUrl,
+    backgroundDataUrl
+  } = brief;
 
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const model = process.env.MODEL || "gpt-4o-mini";
+  return `
+Create a polished landing page for the project below.
 
-  const system = [
-    "You are a senior brand copywriter and front-end engineer.",
-    "Return ONLY a COMPLETE, VALID single-file index.html.",
-    "Inline all CSS & JS. No external requests (fonts, scripts, iframes).",
-    "Use semantic HTML, accessible roles, keyboard focus styles.",
-    "Mobile-first responsive layout.",
-    "Use :root CSS variables for colors (primary, accent) and system font.",
-    "Use provided data URLs for logo and background if present.",
-    "Provide distinctive, project-specific copy tied to the given description.",
-    "Avoid generic feature names like 'Fast', 'Customizable', 'Reliable'.",
-    "Do NOT mention prompts, models, or how it was generated."
-  ].join(" ");
-
-  const user = {
-    name,
-    ticker,
-    description,
-    telegram,
-    twitter,
-    primaryColor: colors?.primary || "#3b82f6",
-    accentColor: colors?.accent || "#2563eb",
-    logoDataUrl: assets?.logo || "",
-    backgroundDataUrl: assets?.background || ""
-  };
-
-  const prompt = `
-Build a polished landing page for the project below.
-
-PROJECT
+PROJECT BRIEF
 - Name: ${name}
 - Ticker: ${ticker || ""}
 - Description: ${description}
 - Telegram: ${telegram || ""}
 - X/Twitter: ${twitter || ""}
 
-DESIGN
-- Colors: primary=${user.primaryColor}, accent=${user.accentColor}
-- If background image provided, layer it in hero with readable overlay.
-- If logo provided, display in header and/or hero.
-- Sticky header with CTA. Soft card hover interactions.
+VISUAL DIRECTION
+- Color variables:
+  --primary: ${primaryColor}
+  --accent:  ${accentColor}
+- If a background image is provided, layer it in the hero with an overlay for readability.
+- If a logo is provided, use it in header/hero.
 
-CONTENT
-- Headline that reflects the project's essence (do NOT use "Fast/Customizable/Reliable").
-- Subheadline tied to the description.
-- 4–6 feature cards with unique names tied to the description (e.g., "Community-led Liquidity", "Audited Contracts", "Cross-chain Routing", etc. — adjust to the given description).
-- Optional: short About / Roadmap / FAQ.
-- Prominent CTA(s). Social buttons for Telegram and X.
+CONTENT & SECTIONS
+- Sticky header with logo, minimal nav, and prominent CTA.
+- Hero: a memorable headline that reflects the description, short subheadline, primary CTA.
+- 4–6 features with unique, project-relevant names (no generic words like Fast/Customizable/Reliable).
+- Optional: About / Token/Utility / Roadmap / FAQ (short, punchy).
+- Social buttons for Telegram and X using the provided links.
 - Footer with © YEAR and simple links.
 
-TECH SPECS
-- Put all styles in a single <style> tag and scripts in a single <script>.
-- Use :root { --primary: ; --accent: ; } and system-ui font stack.
-- Add focus-visible outlines and sufficient contrast.
-- Return ONLY the HTML (no markdown fences, no commentary).
-- The document MUST start with <!doctype html>.
+TECH NOTES
+- Put ALL styles in a single <style> and ALL scripts in a single <script>.
+- Use only system font stack (no webfont links).
+- Start the document with <!doctype html>.
+- Output ONLY the final HTML (no markdown fences, no commentary).
+
+DATA-URL ASSETS
+- Logo: ${logoDataUrl ? "PROVIDED" : "NONE"}
+- Background: ${backgroundDataUrl ? "PROVIDED" : "NONE"}
+Use them if provided.
 `;
-
-  const res = await client.responses.create({
-    model,
-    temperature: 0.8,
-    max_output_tokens: 6000,
-    input: [
-      { role: "system", content: system },
-      { role: "user", content: JSON.stringify(user) },
-      { role: "user", content: prompt }
-    ]
-  });
-
-  let html = res.output_text?.trim?.() || "";
-  if (!html || !/^<!doctype html>/i.test(html)) {
-    // Try to extract text from segments if convenience field missing
-    const parts = res.output?.[0]?.content || [];
-    const textPart = parts.find(p => p.type === "output_text" || p.type === "text");
-    html = textPart?.text?.trim?.() || "";
-  }
-
-  if (!/^<!doctype html>/i.test(html)) {
-    throw new Error("Generator did not return a valid HTML document.");
-  }
-  return html;
 }
 
-/**
- * Fallback HTML yang lebih kontekstual, tanpa frase generik.
- */
-export function fallbackHTML(p) {
-  const {
-    name = "Untitled Project",
-    ticker = "$TOKEN",
-    description = "A new crypto project.",
-    telegram = "#",
-    twitter = "#",
-    colors = { primary: "#3b82f6", accent: "#2563eb" },
-    assets = { logo: "", background: "" }
-  } = p;
+function buildRevisionPrompt(reason) {
+  return `
+REVISION REQUEST:
+The previous HTML failed a quality gate because: ${reason}.
+Please rewrite and return ONLY a COMPLETE, VALID single-file index.html that fixes the issue.
+Remember:
+- No external resources (fonts/scripts/iframes/CDNs).
+- Avoid generic section titles like "Fast", "Customizable", "Reliable".
+- Keep animations, playful buttons, colorful style, and project-specific copy.
+- Start with <!doctype html>.
+`;
+}
 
-  const features = [
-    { title: "Project Mission", body: description.slice(0, 180) + (description.length > 180 ? "..." : "") },
-    { title: "Community Hub", body: "Join our community for updates, governance talks, and launch plans." },
-    { title: "Launch & Utility", body: "A focused roadmap that turns the idea into daily utility." },
-    { title: "Trust & Transparency", body: "Clear docs, visible roadmap, and public socials you can verify." },
-    { title: "Brand & Identity", body: "Strong visuals, consistent tone, and shareable assets." }
-  ];
+export async function generateSiteHTML(payload) {
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const model = process.env.MODEL || "gpt-4o-mini";
+  const maxRetries = Number(process.env.MAX_RETRIES || 2);
 
-  const featCards = features.map(f =>
-    `<div class="card"><h3>${f.title}</h3><p>${f.body}</p></div>`
-  ).join("");
+  const brief = {
+    name: payload.name || "Untitled Project",
+    ticker: payload.ticker || "$TOKEN",
+    description: payload.description || "A crypto project.",
+    telegram: payload.telegram || "",
+    twitter: payload.twitter || "",
+    primaryColor: payload.colors?.primary || "#7c3aed", // purple vibes by default
+    accentColor: payload.colors?.accent || "#06b6d4",  // cyan accent by default
+    logoDataUrl: payload.assets?.logo || "",
+    backgroundDataUrl: payload.assets?.background || ""
+  };
 
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>${name} ${ticker}</title>
-<style>
-:root{--primary:${colors.primary};--accent:${colors.accent}}
-*{box-sizing:border-box}html,body{margin:0}
-body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial;color:#e8ebf5;background:#0b0f1a}
-a{color:inherit;text-decoration:none}
-.header{position:sticky;top:0;background:#0b0f1acc;border-bottom:1px solid #ffffff22;backdrop-filter:blur(8px);z-index:50}
-.wrap{max-width:980px;margin:0 auto;padding:18px}
-.hero{min-height:62vh;display:grid;place-items:center;text-align:center;padding:42px;
-  background:${assets.background ? `url('${assets.background}') center/cover no-repeat` : `linear-gradient(135deg,var(--primary),var(--accent))`}}
-.logo{width:84px;height:84px;border-radius:20px;box-shadow:0 0 0 6px #ffffff22;margin:0 auto 16px;display:block}
-.cta{display:inline-block;padding:12px 16px;border-radius:12px;border:1px solid #ffffff55;background:#00000033}
-.grid{display:grid;gap:16px;grid-template-columns:repeat(3,1fr)}@media(max-width:820px){.grid{grid-template-columns:1fr}}
-.card{background:#ffffff10;border:1px solid #ffffff2a;border-radius:14px;padding:16px;transition:.2s}
-.card:hover{transform:translateY(-4px);box-shadow:0 16px 40px -18px rgba(59,130,246,.35)}
-footer{color:#aab3d0;text-align:center;padding:24px;border-top:1px solid #ffffff18}
-</style>
-</head>
-<body>
-<header class="header"><div class="wrap" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
-  <div style="display:flex;align-items:center;gap:10px">
-    ${assets.logo ? `<img class="logo" src="${assets.logo}" alt="logo" style="width:32px;height:32px;margin:0;box-shadow:none"/>` : ""}
-    <strong>${name}</strong><span style="opacity:.7">${ticker}</span>
-  </div>
-  <div style="display:flex;gap:10px"><a class="cta" href="${telegram||'#'}" target="_blank" rel="noopener">Telegram</a><a class="cta" href="${twitter||'#'}" target="_blank" rel="noopener">X</a></div>
-</div></header>
+  let attempts = 0;
+  let html = "";
+  let lastReason = "";
 
-<section class="hero">
-  <div class="wrap">
-    ${assets.logo ? `<img class="logo" alt="logo" src="${assets.logo}"/>` : ""}
-    <h1>${name} <small>${ticker}</small></h1>
-    <p>${description}</p>
-    <p style="margin-top:16px"><a class="cta" href="${telegram||'#'}" target="_blank" rel="noopener">Join Telegram</a>
-    <a class="cta" href="${twitter||'#'}" target="_blank" rel="noopener">Follow X</a></p>
-  </div>
-</section>
+  while (attempts <= maxRetries) {
+    attempts++;
 
-<div class="wrap" style="margin-top:24px">
-  <div class="grid">${featCards}</div>
-</div>
+    const input = [
+      { role: "system", content: buildSystemMessage() },
+      { role: "user", content: JSON.stringify(brief) },
+      { role: "user", content: attempts === 1 ? buildPrimaryPrompt(brief)
+                                              : buildRevisionPrompt(lastReason) }
+    ];
 
-<footer>© ${new Date().getFullYear()} ${name}</footer>
-</body>
-</html>`;
+    const res = await client.responses.create({
+      model,
+      temperature: 0.95,            // lebih kreatif
+      max_output_tokens: 7000,      // ruang lebih besar untuk HTML lengkap
+      input
+    });
+
+    html = (res.output_text || "").trim();
+
+    // Quality gates
+    if (!isValidHTML(html)) {
+      lastReason = "Document is not a valid single-file HTML starting with <!doctype html>.";
+      continue;
+    }
+    if (violatesExternal(html)) {
+      lastReason = "It contains external resources (fonts/scripts/iframes/CDNs).";
+      continue;
+    }
+    if (hasBannedHeadings(html)) {
+      lastReason = "It uses generic section headings (Fast/Customizable/Reliable).";
+      continue;
+    }
+
+    // Passed all checks
+    return html;
+  }
+
+  // Jika tetap gagal setelah retry, lempar error agar API tidak memakai fallback generik
+  throw new Error(`AI generation failed quality checks after ${maxRetries + 1} attempts: ${lastReason}`);
 }
