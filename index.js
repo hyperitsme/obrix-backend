@@ -41,8 +41,13 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+// Health check
 app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'obrix-website-generator', time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    service: 'obrix-website-generator',
+    time: new Date().toISOString()
+  });
 });
 
 // Upload a logo file
@@ -103,6 +108,7 @@ app.post('/api/generate-zip', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Backend running on http://localhost:${PORT}`);
+// ✅ FIX: listen di 0.0.0.0
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Backend running on http://0.0.0.0:${PORT}`);
 });
