@@ -1,59 +1,68 @@
+// openai.js
 import OpenAI from 'openai';
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// kamu bisa ganti sesuai preferensi
 const MODEL = process.env.MODEL || 'gpt-4.1-mini';
 
+/**
+ * Hasilkan satu file index.html yang modern & “rasa manusia”.
+ * Kita tetap inject logo/bg dari backend, tapi prompt ini membantu model
+ * menghasilkan struktur & estetika yang bagus.
+ */
 export async function generateIndexHtml({
   name,
   ticker,
   description,
-  logoUrl,
-  backgroundUrl,
+  logoUrl = '',
+  backgroundUrl = '',
   theme = 'dark',
   accent = '#7c3aed',
   layout = 'hero',
   bgColor = '#0b0b0b',
 }) {
   const system = [
-    'You are an expert landing-page designer & front-end engineer.',
-    'Return a COMPLETE, VALID **single-file** index.html.',
+    'You are a senior front-end designer & developer.',
+    'Return a COMPLETE, VALID single-file index.html.',
     'Inline all CSS & JS (no external requests).',
-    'Use semantic HTML, A11y, responsive design.',
-    'Use CSS variables; default system fonts.',
+    'Use semantic HTML5, accessibility (landmarks, alt, aria-label), and responsive design.',
+    'Use CSS variables; system UI font stack; tasteful shadows and spacing.',
     'Respect `theme` (dark/light) and `accent` color.',
-    'Do not include analytics/external scripts/iframes/webfonts.',
-    'If placeholders exist <!--OBRIX_LOGO_HERE-->, put the logo <img> there.',
-    'If not, still render a hero section that looks great even without assets.',
+    'Do NOT include analytics, external scripts, iframes, or webfonts.',
+    'If <!--OBRIX_LOGO_HERE--> placeholder exists, place the logo <img> there.',
+    'Always include sections: Hero, About/Story, Token/Ticker highlight, Features/Utilities, Roadmap (concise), Social/CTA buttons.',
+    'Add a "Copy Ticker" button and a back-to-top button with smooth scroll.',
+    'Add meaningful <title>, meta description, and Open Graph tags.',
+    'Provide a tiny base64 favicon in <head>.',
+    'Prefer a classy, minimal, modern look with subtle animations.',
   ].join('\n');
 
   const user = `
-Project: ${name}
+Project Name: ${name}
 Ticker: ${ticker}
 Theme: ${theme}
 Accent: ${accent}
+Preferred Layout: ${layout}
+Logo URL (hint for you, may be replaced later): ${logoUrl || 'N/A'}
+Background URL (hint for you, may be replaced later): ${backgroundUrl || 'N/A'}
 Background Color: ${bgColor}
-Layout Preference: ${layout}
-Provided Logo URL (may be data URI or regular URL): ${logoUrl || 'N/A'}
-Provided Background URL (may be data URI or regular URL): ${backgroundUrl || 'N/A'}
 
 Description:
 ${description}
 
-Hard Requirements:
-- Single file HTML.
-- Sections: Hero, About, Token Highlight, Features, Small Roadmap, CTA, Footer.
-- Add "Copy Ticker" button that copies ${ticker} to clipboard.
-- Add "Back to top" floating button.
-- Use CSS variables; minimal JS at end for copy/scroll.
-- Include meta tags (title, description, og: tags) and base64 favicon.
-- Add a comment placeholder <!--OBRIX_LOGO_HERE--> inside the hero header area.
+Strict Requirements:
+- ONE FILE ONLY (index.html) with inline CSS/JS.
+- Define CSS variables: --accent for ${accent}.
+- Use <main> container with max-width ~1000px and generous spacing.
+- Include <!--OBRIX_LOGO_HERE--> comment in the hero where a logo would go (even if none).
+- If you style background, do it on body with a gradient using --accent and ${bgColor}; do not rely on external assets.
+- Avoid huge opaque overlays that could hide body background.
+- Never output Markdown code fences. Output pure HTML.
 `;
 
-  // Chat Completions (akan tetap mungkin mengeluarkan fences; kita strip di server)
+  // gunakan Chat Completions (stabil di banyak env)
   const resp = await client.chat.completions.create({
     model: MODEL,
     messages: [
@@ -63,8 +72,12 @@ Hard Requirements:
     temperature: 0.7,
   });
 
-  const html = resp.choices?.[0]?.message?.content || '';
-  if (!html || !String(html).toLowerCase().includes('<html')) {
+  let html = resp.choices?.[0]?.message?.content || '';
+  // kebetulan, ada model yang masih memberi ```html ... ``` — backend akan strip lagi,
+  // tapi kita rapikan di sini sekalian:
+  html = html.replace(/```html|```/g, '').trim();
+
+  if (!html || !/<html[\s>]/i.test(html) || !/<\/html>/i.test(html)) {
     throw new Error('Model did not return a valid index.html');
   }
   return html;
